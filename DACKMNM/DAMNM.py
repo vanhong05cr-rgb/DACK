@@ -17,17 +17,10 @@ import re
 # ===============================
 client = MongoClient("mongodb://localhost:27017/")
 db = client["goodreads_final"]
-books_col = db["books"]
-metrics_col = db["book_metrics_daily"]
+books_col = db["books_2"]
+metrics_col = db["book_metrics_daily_2"]
 
 metrics_col.create_index([("book_id", 1), ("date", 1)], unique=True)
-
-reviews_col = db["book_reviews"]
-
-reviews_col.create_index(
-    [("book_id", 1), ("review_id", 1)],
-    unique=True
-)
 
 # ===============================
 # 3. UTIL
@@ -40,7 +33,21 @@ HEADERS = {
 }
 
 # ===============================
-# 4. CRAWL CHI TIẾT (REQUESTS – NHANH)
+# 4. LẤY TOP 20 COMMENTS
+# ===============================
+def extract_comments(soup, limit=20):
+    comments = []
+    review_blocks = soup.select("article.ReviewCard span.Formatted")
+
+    for r in review_blocks[:limit]:
+        text = r.get_text(" ", strip=True)
+        if text:
+            comments.append(text)
+
+    return comments
+
+# ===============================
+# 5. CRAWL CHI TIẾT SÁCH (REQUESTS)
 # ===============================
 def crawl_book_fast(book_url, genre):
     try:
@@ -50,16 +57,16 @@ def crawl_book_fast(book_url, genre):
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        title = soup.find("h1").text.strip()
+        title = soup.find("h1").get_text(strip=True)
 
         author_tag = soup.find("a", class_="ContributorLink")
-        author = author_tag.text.strip() if author_tag else None
+        author = author_tag.get_text(strip=True) if author_tag else None
 
         rating_tag = soup.find("div", class_="RatingStatistics__rating")
-        avg_rating = float(rating_tag.text.strip()) if rating_tag else None
+        avg_rating = float(rating_tag.get_text(strip=True)) if rating_tag else None
 
         review_span = soup.find("span", {"data-testid": "ratingsCount"})
-        review_count = int(re.sub(r"[^\d]", "", review_span.text)) if review_span else None
+        review_count = int(re.sub(r"[^\d]", "", review_span.get_text())) if review_span else None
 
         cover_tag = soup.find("img", class_="ResponsiveImage")
         cover_image = cover_tag["src"] if cover_tag else None
@@ -71,6 +78,8 @@ def crawl_book_fast(book_url, genre):
                 publish_year = int(m.group(1))
                 break
 
+        comments = extract_comments(soup, limit=20)
+
         return {
             "book_url": book_url,
             "title": title,
@@ -79,98 +88,16 @@ def crawl_book_fast(book_url, genre):
             "review_count": review_count,
             "publish_year": publish_year,
             "cover_image": cover_image,
-            "genres": [genre]
+            "genres": [genre],
+            "comments": comments
         }
 
-    except Exception as e:
+    except Exception:
         print("❌ Error:", book_url)
         return None
-def crawl_reviews_selenium(driver, book_url, book_id, max_reviews=5):
-    reviews = []
-
-    try:
-        driver.get(book_url)
-        wait = WebDriverWait(driver, 10)
-
-        # chờ review mới
-        wait.until(EC.presence_of_element_located(
-            (By.CSS_SELECTOR, "article[data-testid='review']")
-        ))
-
-        review_cards = driver.find_elements(
-            By.CSS_SELECTOR,
-            "article[data-testid='review']"
-        )
-
-        for card in review_cards[:max_reviews]:
-
-            review_id = card.get_attribute("data-review-id")
-
-            # username
-            try:
-                user_name = card.find_element(
-                    By.CSS_SELECTOR,
-                    "a[data-testid='reviewer-name']"
-                ).text.strip()
-            except:
-                user_name = None
-
-            # rating
-            try:
-                rating_label = card.find_element(
-                    By.CSS_SELECTOR,
-                    "span[aria-label*='stars']"
-                ).get_attribute("aria-label")
-                rating = int(rating_label[0])
-            except:
-                rating = None
-
-            # show more
-            try:
-                show_more = card.find_element(
-                    By.CSS_SELECTOR,
-                    "button[data-testid='show-more-review-text']"
-                )
-                driver.execute_script("arguments[0].click();", show_more)
-                time.sleep(0.3)
-            except:
-                pass
-
-            # review text
-            try:
-                review_text = card.find_element(
-                    By.CSS_SELECTOR,
-                    "span[data-testid='review-text']"
-                ).text.strip()
-            except:
-                review_text = None
-
-            # date
-            try:
-                review_date = card.find_element(By.TAG_NAME, "time").text
-            except:
-                review_date = None
-
-            reviews.append({
-                "book_id": book_id,
-                "review_id": review_id,
-                "user_name": user_name,
-                "rating": rating,
-                "review_text": review_text,
-                "review_date": review_date,
-                "crawl_date": str(date.today())
-            })
-
-        return reviews
-
-    except Exception as e:
-        print("⚠️ No reviews / UI changed:", book_url)
-        return []
-
-    
 
 # ===============================
-# 5. SELENIUM SETUP (CHỈ LẤY LINK)
+# 6. SELENIUM – LẤY LINK SÁCH
 # ===============================
 options = webdriver.ChromeOptions()
 options.add_argument("--disable-blink-features=AutomationControlled")
@@ -181,21 +108,9 @@ driver = webdriver.Chrome(
     options=options
 )
 
-# ===============================
-# 6. LẤY LINK SÁCH
-# ===============================
-GENRES = [
-    "art", "biography", "business", "chick-lit", "christian", "classics",
-    "comics", "contemporary", "cookbooks", "crime", "fantasy", "fiction",
-    "graphic-novels", "historical-fiction", "history", "horror",
-    "humor", "manga", "memoir", "music", "mystery", "nonfiction",
-    "poetry", "psychology", "religion", "romance", "science",
-    "science-fiction", "self-help", "suspense", "spirituality",
-    "sports", "thriller", "travel", "young-adult"
-]
-
-MAX_PAGES = 1  # mỗi genre
-book_urls = set()  # set để tránh trùng
+GENRES = ["fiction"]  # 👉 chạy thử 1 genre cho nhanh
+MAX_PAGES = 3         # 👉 đủ link để test
+book_urls = set()
 
 for genre in GENRES:
     for page in range(1, MAX_PAGES + 1):
@@ -209,17 +124,24 @@ for genre in GENRES:
         for a in links:
             book_urls.add("https://www.goodreads.com" + a["href"])
 
-        print(f"📄 {genre} | page {page} → total links: {len(book_urls)}")
+        print(f"📄 {genre} | page {page} → links: {len(book_urls)}")
 
 driver.quit()
-print(f"\n🔗 TOTAL BOOK LINKS: {len(book_urls)}")
-review_driver = webdriver.Chrome(
-    service=Service(ChromeDriverManager().install()),
-    options=options
-)
 
-with ThreadPoolExecutor(max_workers=15) as executor:
-    futures = [executor.submit(crawl_book_fast, url, genre) for url in book_urls]
+# ===============================
+# 7. CHỈ CHẠY THỬ 50 SÁCH
+# ===============================
+book_urls_test = list(book_urls)[:50]
+print(f"\n🚀 RUN TEST: {len(book_urls_test)} BOOKS")
+
+# ===============================
+# 8. ĐA LUỒNG + LƯU DB
+# ===============================
+with ThreadPoolExecutor(max_workers=5) as executor:
+    futures = [
+        executor.submit(crawl_book_fast, url, "fiction")
+        for url in book_urls_test
+    ]
 
     for future in as_completed(futures):
         data = future.result()
@@ -236,7 +158,8 @@ with ThreadPoolExecutor(max_workers=15) as executor:
                 "publish_year": data["publish_year"],
                 "cover_image": data["cover_image"],
                 "book_url": data["book_url"],
-                "genres": {"$each": data["genres"]}
+                "genres": data["genres"],
+                "comments": data["comments"]
             }},
             upsert=True
         )
@@ -250,23 +173,6 @@ with ThreadPoolExecutor(max_workers=15) as executor:
             upsert=True
         )
 
-        # 👉 GẮN REVIEW Ở ĐÂY
-        reviews = crawl_reviews_selenium(
-            review_driver,
-            data["book_url"],
-            book_id,
-            max_reviews=3
-        )
+        print("✅ Saved:", data["title"], "| comments:", len(data["comments"]))
 
-        for review in reviews:
-            reviews_col.update_one(
-                {
-                    "book_id": review["book_id"],
-                    "review_id": review["review_id"]
-                },
-                {"$setOnInsert": review},
-                upsert=True
-            )
-
-        print("✅ Saved book + reviews:", data["title"])
-        time.sleep(1)
+print("\n🎉 DONE – TEST 50 BOOKS SUCCESS")
