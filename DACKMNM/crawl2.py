@@ -33,7 +33,21 @@ HEADERS = {
 }
 
 # ===============================
-# 4. CRAWL CHI TIẾT (REQUESTS – NHANH)
+# 4. LẤY COMMENTS (REVIEW TEXT)
+# ===============================
+def extract_comments(soup, limit=5):
+    comments = []
+    review_blocks = soup.select("article.ReviewCard span.Formatted")
+
+    for r in review_blocks[:limit]:
+        text = r.get_text(" ", strip=True)
+        if text:
+            comments.append(text)
+
+    return comments
+
+# ===============================
+# 5. CRAWL CHI TIẾT (REQUESTS – NHANH)
 # ===============================
 def crawl_book_fast(book_url, genre):
     try:
@@ -43,16 +57,16 @@ def crawl_book_fast(book_url, genre):
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        title = soup.find("h1").text.strip()
+        title = soup.find("h1").get_text(strip=True)
 
         author_tag = soup.find("a", class_="ContributorLink")
-        author = author_tag.text.strip() if author_tag else None
+        author = author_tag.get_text(strip=True) if author_tag else None
 
         rating_tag = soup.find("div", class_="RatingStatistics__rating")
-        avg_rating = float(rating_tag.text.strip()) if rating_tag else None
+        avg_rating = float(rating_tag.get_text(strip=True)) if rating_tag else None
 
         review_span = soup.find("span", {"data-testid": "ratingsCount"})
-        review_count = int(re.sub(r"[^\d]", "", review_span.text)) if review_span else None
+        review_count = int(re.sub(r"[^\d]", "", review_span.get_text())) if review_span else None
 
         cover_tag = soup.find("img", class_="ResponsiveImage")
         cover_image = cover_tag["src"] if cover_tag else None
@@ -64,6 +78,9 @@ def crawl_book_fast(book_url, genre):
                 publish_year = int(m.group(1))
                 break
 
+        # ✅ COMMENTS
+        comments = extract_comments(soup, limit=5)
+
         return {
             "book_url": book_url,
             "title": title,
@@ -72,15 +89,16 @@ def crawl_book_fast(book_url, genre):
             "review_count": review_count,
             "publish_year": publish_year,
             "cover_image": cover_image,
-            "genres": [genre]
+            "genres": [genre],
+            "comments": comments
         }
 
     except Exception as e:
-        print("❌ Error:", book_url)
+        print(" Error:", book_url)
         return None
 
 # ===============================
-# 5. SELENIUM SETUP (CHỈ LẤY LINK)
+# 6. SELENIUM SETUP (CHỈ LẤY LINK)
 # ===============================
 options = webdriver.ChromeOptions()
 options.add_argument("--disable-blink-features=AutomationControlled")
@@ -92,7 +110,7 @@ driver = webdriver.Chrome(
 )
 
 # ===============================
-# 6. LẤY LINK SÁCH
+# 7. LẤY LINK SÁCH
 # ===============================
 GENRES = [
     "art", "biography", "business", "chick-lit", "christian", "classics",
@@ -104,8 +122,8 @@ GENRES = [
     "sports", "thriller", "travel", "young-adult"
 ]
 
-MAX_PAGES = 5  # mỗi genre
-book_urls = set()  # set để tránh trùng
+MAX_PAGES = 1
+book_urls = set()
 
 for genre in GENRES:
     for page in range(1, MAX_PAGES + 1):
@@ -122,13 +140,22 @@ for genre in GENRES:
         print(f"📄 {genre} | page {page} → total links: {len(book_urls)}")
 
 driver.quit()
-print(f"\n🔗 TOTAL BOOK LINKS: {len(book_urls)}")
+print(f"\n TOTAL BOOK LINKS: {len(book_urls)}")
 
 # ===============================
-# 7. ĐA LUỒNG CRAWL + LƯU DB
+# 8. GIỚI HẠN CHẠY TRƯỚC 50 SÁCH
 # ===============================
-with ThreadPoolExecutor(max_workers=15) as executor:
-    futures = [executor.submit(crawl_book_fast, url, genre) for url in book_urls]
+LIMIT = 50
+book_urls_test = list(book_urls)[:LIMIT]
+
+# ===============================
+# 9. ĐA LUỒNG CRAWL + LƯU DB
+# ===============================
+with ThreadPoolExecutor(max_workers=10) as executor:
+    futures = [
+        executor.submit(crawl_book_fast, url, "mixed")
+        for url in book_urls_test
+    ]
 
     for future in as_completed(futures):
         data = future.result()
@@ -146,7 +173,8 @@ with ThreadPoolExecutor(max_workers=15) as executor:
                 "publish_year": data["publish_year"],
                 "cover_image": data["cover_image"],
                 "book_url": data["book_url"],
-                "genres": {"$each": data["genres"]}
+                "genres": data["genres"],
+                "comments": data["comments"]
             }},
             upsert=True
         )
@@ -161,6 +189,6 @@ with ThreadPoolExecutor(max_workers=15) as executor:
             upsert=True
         )
 
-        print("✅ Saved:", data["title"])
+        print(" Saved:", data["title"])
 
-print("\n🎉 DONE – Crawl nhanh, sạch, không trùng")
+print("\n DONE – Crawl 50 books + comments thành công")
