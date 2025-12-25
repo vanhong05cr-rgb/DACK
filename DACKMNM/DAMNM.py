@@ -22,6 +22,13 @@ metrics_col = db["book_metrics_daily"]
 
 metrics_col.create_index([("book_id", 1), ("date", 1)], unique=True)
 
+reviews_col = db["book_reviews"]
+
+reviews_col.create_index(
+    [("book_id", 1), ("review_id", 1)],
+    unique=True
+)
+
 # ===============================
 # 3. UTIL
 # ===============================
@@ -78,6 +85,89 @@ def crawl_book_fast(book_url, genre):
     except Exception as e:
         print("❌ Error:", book_url)
         return None
+def crawl_reviews_selenium(driver, book_url, book_id, max_reviews=5):
+    reviews = []
+
+    try:
+        driver.get(book_url)
+        wait = WebDriverWait(driver, 10)
+
+        # chờ review mới
+        wait.until(EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "article[data-testid='review']")
+        ))
+
+        review_cards = driver.find_elements(
+            By.CSS_SELECTOR,
+            "article[data-testid='review']"
+        )
+
+        for card in review_cards[:max_reviews]:
+
+            review_id = card.get_attribute("data-review-id")
+
+            # username
+            try:
+                user_name = card.find_element(
+                    By.CSS_SELECTOR,
+                    "a[data-testid='reviewer-name']"
+                ).text.strip()
+            except:
+                user_name = None
+
+            # rating
+            try:
+                rating_label = card.find_element(
+                    By.CSS_SELECTOR,
+                    "span[aria-label*='stars']"
+                ).get_attribute("aria-label")
+                rating = int(rating_label[0])
+            except:
+                rating = None
+
+            # show more
+            try:
+                show_more = card.find_element(
+                    By.CSS_SELECTOR,
+                    "button[data-testid='show-more-review-text']"
+                )
+                driver.execute_script("arguments[0].click();", show_more)
+                time.sleep(0.3)
+            except:
+                pass
+
+            # review text
+            try:
+                review_text = card.find_element(
+                    By.CSS_SELECTOR,
+                    "span[data-testid='review-text']"
+                ).text.strip()
+            except:
+                review_text = None
+
+            # date
+            try:
+                review_date = card.find_element(By.TAG_NAME, "time").text
+            except:
+                review_date = None
+
+            reviews.append({
+                "book_id": book_id,
+                "review_id": review_id,
+                "user_name": user_name,
+                "rating": rating,
+                "review_text": review_text,
+                "review_date": review_date,
+                "crawl_date": str(date.today())
+            })
+
+        return reviews
+
+    except Exception as e:
+        print("⚠️ No reviews / UI changed:", book_url)
+        return []
+
+    
 
 # ===============================
 # 5. SELENIUM SETUP (CHỈ LẤY LINK)
@@ -123,10 +213,11 @@ for genre in GENRES:
 
 driver.quit()
 print(f"\n🔗 TOTAL BOOK LINKS: {len(book_urls)}")
+review_driver = webdriver.Chrome(
+    service=Service(ChromeDriverManager().install()),
+    options=options
+)
 
-# ===============================
-# 7. ĐA LUỒNG CRAWL + LƯU DB
-# ===============================
 with ThreadPoolExecutor(max_workers=15) as executor:
     futures = [executor.submit(crawl_book_fast, url, genre) for url in book_urls]
 
@@ -137,7 +228,6 @@ with ThreadPoolExecutor(max_workers=15) as executor:
 
         book_id = make_book_id(data["book_url"])
 
-        # LƯU THÔNG TIN TĨNH
         books_col.update_one(
             {"_id": book_id},
             {"$set": {
@@ -151,7 +241,6 @@ with ThreadPoolExecutor(max_workers=15) as executor:
             upsert=True
         )
 
-        # LƯU METRICS THEO NGÀY
         metrics_col.update_one(
             {"book_id": book_id, "date": str(date.today())},
             {"$setOnInsert": {
@@ -161,6 +250,23 @@ with ThreadPoolExecutor(max_workers=15) as executor:
             upsert=True
         )
 
-        print("✅ Saved:", data["title"])
+        # 👉 GẮN REVIEW Ở ĐÂY
+        reviews = crawl_reviews_selenium(
+            review_driver,
+            data["book_url"],
+            book_id,
+            max_reviews=3
+        )
 
-print("\n🎉 DONE – Crawl nhanh, sạch, không trùng")
+        for review in reviews:
+            reviews_col.update_one(
+                {
+                    "book_id": review["book_id"],
+                    "review_id": review["review_id"]
+                },
+                {"$setOnInsert": review},
+                upsert=True
+            )
+
+        print("✅ Saved book + reviews:", data["title"])
+        time.sleep(1)
