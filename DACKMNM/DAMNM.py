@@ -11,45 +11,75 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import time
 import re
+import hashlib
 
 # ===============================
 # 2. MONGODB SETUP
 # ===============================
 client = MongoClient("mongodb://localhost:27017/")
-db = client["goodreads_final"]
-books_col = db["books_3"]
-metrics_col = db["book_metrics_daily_3"]
-
-metrics_col.create_index([("book_id", 1), ("date", 1)], unique=True)
-
+db = client["Goodreads_01"]
+books_col = db["books"]
+reviews_col = db["reviews"]
 # ===============================
 # 3. UTIL
 # ===============================
 def make_book_id(url):
-    return "GR_" + url.split("/")[-1].split("-")[0]
+    # Lấy phần cuối của URL (VD: 368593.The_4_Hour_Workweek)
+    slug = url.split("/")[-1]
+    
+    # Cắt bỏ phần sau dấu chấm (.) để loại bỏ tên sách kiểu "ID.Title"
+    clean_id = slug.split(".")[0]
+    
+    # Cắt tiếp dấu gạch ngang (-) đề phòng trường hợp link kiểu "ID-Title"
+    clean_id = clean_id.split("-")[0]
+    
+    # Kết quả sẽ chỉ còn lại số ID 
+    return "GR_" + clean_id
+
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
+
 # ===============================
 # 4. LẤY COMMENTS (REVIEW TEXT)
 # ===============================
-def extract_comments(soup, limit=20):
+def crawl_reviews(book_id, limit=1000):
     comments = []
-    review_blocks = soup.select("article.ReviewCard span.Formatted")
+    page = 1
 
-    for r in review_blocks[:limit]:
-        text = r.get_text(" ", strip=True)
-        if text:
-            comments.append(text)
+    while len(comments) < limit:
+        url = f"https://www.goodreads.com/book/show/{book_id}/reviews?page={page}"
+        r = requests.get(url, headers=HEADERS, timeout=10)
 
+        if r.status_code != 200:
+            break
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        blocks = soup.select("article.ReviewCard span.Formatted")
+
+        if not blocks:
+            break
+
+        for b in blocks:
+            text = b.get_text(" ", strip=True)
+            if text:
+                comments.append(text)
+                if len(comments) >= limit:
+                    break
+
+        page += 1
+        time.sleep(0.5)  # tránh bị block
+    # print("Reviews:", len(comments), "→", book_url)
     return comments
+
+
 
 # ===============================
 # 5. CRAWL CHI TIẾT (REQUESTS – NHANH)
 # ===============================
-def crawl_book_fast(book_url, genre):
+def crawl_book_fast(book_url, genres):
     try:
         r = requests.get(book_url, headers=HEADERS, timeout=10)
         if r.status_code != 200:
@@ -79,7 +109,9 @@ def crawl_book_fast(book_url, genre):
                 break
 
         # ✅ COMMENTS
-        comments = extract_comments(soup, limit=20)
+        book_id = book_url.split("/")[-1].split(".")[0]
+        comments = crawl_reviews(book_id, limit=1000)
+
 
         return {
             "book_url": book_url,
@@ -89,7 +121,7 @@ def crawl_book_fast(book_url, genre):
             "review_count": review_count,
             "publish_year": publish_year,
             "cover_image": cover_image,
-            "genres": [genre],
+            "genres": genres,
             "comments": comments
         }
 
@@ -122,41 +154,46 @@ GENRES = [
     "sports", "thriller", "travel", "young-adult"
 ]
 
-MAX_PAGES = 5
-book_urls = set()
+
+MAX_PAGES = 100
+book_urls = {}
 
 for genre in GENRES:
     for page in range(1, MAX_PAGES + 1):
-        url = f"https://www.goodreads.com/shelf/show/{genre}?page={page}"
+        url = f"https://www.goodreads.com/search?q={genre}&search_type=books&page={page}"
         driver.get(url)
-        time.sleep(2)
+        time.sleep(3)
 
         soup = BeautifulSoup(driver.page_source, "html.parser")
         links = soup.select("a.bookTitle")
 
+        if not links:
+            break
+
         for a in links:
-            book_urls.add("https://www.goodreads.com" + a["href"])
+            book_url = "https://www.goodreads.com" + a["href"]
+            book_urls.setdefault(book_url, set()).add(genre)
 
-        print(f"📄 {genre} | page {page} → total links: {len(book_urls)}")
-
+        print(f"📄 {genre} | page {page} → total: {len(book_urls)}")
+        
 driver.quit()
-print(f"\n TOTAL BOOK LINKS: {len(book_urls)}")
+print(f"\n📚 TOTAL BOOK LINKS: {len(book_urls)}")
+
+
+
 
 # ===============================
 # 8. GIỚI HẠN CHẠY
 # ===============================
-# Để chạy toàn bộ link đã lấy được (ví dụ 1274 link), hãy dùng:
-book_urls_test = list(book_urls) 
+# Để chạy toàn bộ link đã lấy được 
+book_urls_test = list(book_urls.items())
 
-# Hoặc nếu muốn con số cụ thể:
-# book_urls_test = list(book_urls)[:1274]
-# ===============================
 # 9. ĐA LUỒNG CRAWL + LƯU DB
 # ===============================
 with ThreadPoolExecutor(max_workers=10) as executor:
     futures = [
-        executor.submit(crawl_book_fast, url, "mixed")
-        for url in book_urls_test
+        executor.submit(crawl_book_fast, url, list(genres))
+        for url, genres in book_urls_test
     ]
 
     for future in as_completed(futures):
@@ -166,7 +203,6 @@ with ThreadPoolExecutor(max_workers=10) as executor:
 
         book_id = make_book_id(data["book_url"])
 
-        # LƯU THÔNG TIN TĨNH
         books_col.update_one(
             {"_id": book_id},
             {"$set": {
@@ -175,21 +211,34 @@ with ThreadPoolExecutor(max_workers=10) as executor:
                 "publish_year": data["publish_year"],
                 "cover_image": data["cover_image"],
                 "book_url": data["book_url"],
-                "genres": data["genres"],
-                "comments": data["comments"]
+                "avg_rating": data["avg_rating"],
+                "review_count": data["review_count"],
+                "review_count_crawled": len(data["comments"]),
+
+                # "comments": data["comments"],
+                "last_updated": str(date.today())
+            },
+            "$addToSet": {
+                "genres": {"$each": data["genres"]}
             }},
             upsert=True
         )
 
-        # LƯU METRICS THEO NGÀY
-        metrics_col.update_one(
-            {"book_id": book_id, "date": str(date.today())},
-            {"$setOnInsert": {
-                "avg_rating": data["avg_rating"],
-                "review_count": data["review_count"]
-            }},
-            upsert=True
-        )
+        for c in data["comments"]:
+            review_hash = hashlib.md5(
+                (book_id + c).encode("utf-8")
+            ).hexdigest()
+
+            reviews_col.update_one(
+                {"_id": review_hash},
+                {"$setOnInsert": {
+                    "book_id": book_id,
+                    "text": c,
+                    "genres": data["genres"],
+                    "created_at": str(date.today())
+                }},
+                upsert=True
+            )
 
         print(" Saved:", data["title"])
 
