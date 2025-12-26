@@ -17,8 +17,8 @@ import re
 # ===============================
 client = MongoClient("mongodb://localhost:27017/")
 db = client["goodreads_final"]
-books_col = db["books_2"]
-metrics_col = db["book_metrics_daily_2"]
+books_col = db["books_3"]
+metrics_col = db["book_metrics_daily_3"]
 
 metrics_col.create_index([("book_id", 1), ("date", 1)], unique=True)
 
@@ -33,7 +33,7 @@ HEADERS = {
 }
 
 # ===============================
-# 4. LẤY TOP 20 COMMENTS
+# 4. LẤY COMMENTS (REVIEW TEXT)
 # ===============================
 def extract_comments(soup, limit=20):
     comments = []
@@ -47,7 +47,7 @@ def extract_comments(soup, limit=20):
     return comments
 
 # ===============================
-# 5. CRAWL CHI TIẾT SÁCH (REQUESTS)
+# 5. CRAWL CHI TIẾT (REQUESTS – NHANH)
 # ===============================
 def crawl_book_fast(book_url, genre):
     try:
@@ -78,6 +78,7 @@ def crawl_book_fast(book_url, genre):
                 publish_year = int(m.group(1))
                 break
 
+        # ✅ COMMENTS
         comments = extract_comments(soup, limit=20)
 
         return {
@@ -92,12 +93,12 @@ def crawl_book_fast(book_url, genre):
             "comments": comments
         }
 
-    except Exception:
-        print("❌ Error:", book_url)
+    except Exception as e:
+        print(" Error:", book_url)
         return None
 
 # ===============================
-# 6. SELENIUM – LẤY LINK SÁCH
+# 6. SELENIUM SETUP (CHỈ LẤY LINK)
 # ===============================
 options = webdriver.ChromeOptions()
 options.add_argument("--disable-blink-features=AutomationControlled")
@@ -108,8 +109,20 @@ driver = webdriver.Chrome(
     options=options
 )
 
-GENRES = ["fiction"]  # 👉 chạy thử 1 genre cho nhanh
-MAX_PAGES = 3         # 👉 đủ link để test
+# ===============================
+# 7. LẤY LINK SÁCH
+# ===============================
+GENRES = [
+    "art", "biography", "business", "chick-lit", "christian", "classics",
+    "comics", "contemporary", "cookbooks", "crime", "fantasy", "fiction",
+    "graphic-novels", "historical-fiction", "history", "horror",
+    "humor", "manga", "memoir", "music", "mystery", "nonfiction",
+    "poetry", "psychology", "religion", "romance", "science",
+    "science-fiction", "self-help", "suspense", "spirituality",
+    "sports", "thriller", "travel", "young-adult"
+]
+
+MAX_PAGES = 5
 book_urls = set()
 
 for genre in GENRES:
@@ -124,22 +137,25 @@ for genre in GENRES:
         for a in links:
             book_urls.add("https://www.goodreads.com" + a["href"])
 
-        print(f"📄 {genre} | page {page} → links: {len(book_urls)}")
+        print(f"📄 {genre} | page {page} → total links: {len(book_urls)}")
 
 driver.quit()
+print(f"\n TOTAL BOOK LINKS: {len(book_urls)}")
 
 # ===============================
-# 7. CHỈ CHẠY THỬ 50 SÁCH
+# 8. GIỚI HẠN CHẠY
 # ===============================
-book_urls_test = list(book_urls)[:50]
-print(f"\n🚀 RUN TEST: {len(book_urls_test)} BOOKS")
+# Để chạy toàn bộ link đã lấy được (ví dụ 1274 link), hãy dùng:
+book_urls_test = list(book_urls) 
 
+# Hoặc nếu muốn con số cụ thể:
+# book_urls_test = list(book_urls)[:1274]
 # ===============================
-# 8. ĐA LUỒNG + LƯU DB
+# 9. ĐA LUỒNG CRAWL + LƯU DB
 # ===============================
-with ThreadPoolExecutor(max_workers=5) as executor:
+with ThreadPoolExecutor(max_workers=10) as executor:
     futures = [
-        executor.submit(crawl_book_fast, url, "fiction")
+        executor.submit(crawl_book_fast, url, "mixed")
         for url in book_urls_test
     ]
 
@@ -150,6 +166,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
 
         book_id = make_book_id(data["book_url"])
 
+        # LƯU THÔNG TIN TĨNH
         books_col.update_one(
             {"_id": book_id},
             {"$set": {
@@ -164,6 +181,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
             upsert=True
         )
 
+        # LƯU METRICS THEO NGÀY
         metrics_col.update_one(
             {"book_id": book_id, "date": str(date.today())},
             {"$setOnInsert": {
@@ -173,6 +191,6 @@ with ThreadPoolExecutor(max_workers=5) as executor:
             upsert=True
         )
 
-        print("✅ Saved:", data["title"], "| comments:", len(data["comments"]))
+        print(" Saved:", data["title"])
 
-print("\n🎉 DONE – TEST 50 BOOKS SUCCESS")
+print("\n DONE – Crawl books + comments thành công")
