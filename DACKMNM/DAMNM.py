@@ -16,8 +16,8 @@ import hashlib
 # ===============================
 # 2. MONGODB SETUP
 # ===============================
-client = MongoClient("mongodb://localhost:27017/")
-db = client["Goodreads_01"]
+client = MongoClient("mongodb+srv://vanhong05cr:Aptx.4869@cluster0.dxonyik.mongodb.net/Goodreads?retryWrites=true&w=majority")
+db = client["Goodreads"]
 books_col = db["books"]
 reviews_col = db["reviews"]
 # ===============================
@@ -45,7 +45,7 @@ HEADERS = {
 # ===============================
 # 4. LẤY COMMENTS (REVIEW TEXT)
 # ===============================
-def crawl_reviews(book_id, limit=1000):
+def crawl_reviews(book_id, limit=100):
     comments = []
     page = 1
 
@@ -110,7 +110,7 @@ def crawl_book_fast(book_url, genres):
 
         # ✅ COMMENTS
         book_id = book_url.split("/")[-1].split(".")[0]
-        comments = crawl_reviews(book_id, limit=1000)
+        comments = crawl_reviews(book_id, limit=100)
 
 
         return {
@@ -155,7 +155,7 @@ GENRES = [
 ]
 
 
-MAX_PAGES = 100
+MAX_PAGES = 25
 book_urls = {}
 
 for genre in GENRES:
